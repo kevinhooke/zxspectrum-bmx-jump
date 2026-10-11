@@ -20,3 +20,10 @@ is increased by 1
 - the player has 3 attempts
 - 1 attempt is lost for each person hit
 - after attempts are lost the game ends and score is displayed
+
+## Graphics requirements
+
+- the player is a rider on a BMX bike
+- the size of the bike should be slightly larger than the size/height of the ramp
+- when the player presses the pedal keys, the player character's legs should be
+animated up and down to show the rider pedalling

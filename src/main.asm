@@ -9,13 +9,22 @@ SCREEN_ADDR     EQU $4000
 ATTR_ADDR       EQU $5800
 
 GROUND_ROW      EQU 18
+; The ramp is a staircase one cell taller per column, so its tallest
+; column is RAMP_RISE+1 cells: 3 cells against the 4-cell-tall bike.
 RAMP_START_COL  EQU 10
-RAMP_END_COL    EQU 14
-RAMP_RISE       EQU 4
+RAMP_END_COL    EQU 12
+RAMP_RISE       EQU RAMP_END_COL-RAMP_START_COL
 LIFTOFF_ROW     EQU GROUND_ROW-RAMP_RISE
-PEOPLE_START_COL EQU 15
-MAX_NPEOPLE     EQU 16
-BIKE_START_COL  EQU 2
+PEOPLE_START_COL EQU RAMP_END_COL+1
+MAX_NPEOPLE     EQU 32-PEOPLE_START_COL
+
+; Bike sprite size in cells. BikeCol/BikeRow are its bottom-left cell
+; (the rear wheel); the front wheel is what rides up the ramp.
+BIKE_W          EQU 4
+BIKE_H          EQU 4
+BIKE_START_COL  EQU 1
+LIFTOFF_COL     EQU RAMP_END_COL-BIKE_W+1
+MAX_BIKE_COL    EQU 32-BIKE_W
 
 MAX_SPEED       EQU 28
 PEDAL_INC       EQU 3
@@ -79,6 +88,7 @@ RoundInit:
     ld (LastKey),a
     ld (PrevPO),a
     ld (FrictionCounter),a
+    ld (BikeFrame),a
     ld a,MOVE_THRESHOLD
     ld (MoveTimer),a
 
@@ -94,17 +104,17 @@ PedalLoop:
     call ApplyFriction
     call AdvanceBike
     ld a,(BikeCol)
-    cp RAMP_END_COL
+    cp LIFTOFF_COL
     jr c,PedalLoop
     jp JumpPhase
 
 ; ---------------------------------------------------------------------
 ; Jump phase: fixed 8-frame arc. Horizontal distance travelled equals
-; the speed at takeoff; whether that clears the line of people decides
-; success or failure.
+; the speed at takeoff; the jump succeeds if the rear wheel lands past
+; the last person.
 ; ---------------------------------------------------------------------
 JumpPhase:
-    ld a,RAMP_END_COL
+    ld a,LIFTOFF_COL
     ld (BikeCol),a
     ld a,LIFTOFF_ROW
     ld (BikeRow),a
@@ -135,9 +145,9 @@ JumpPhase:
 .havemove:
     ld hl,BikeCol
     add a,(hl)
-    cp 32
+    cp MAX_BIKE_COL+1
     jr c,.okcol
-    ld a,31
+    ld a,MAX_BIKE_COL
 .okcol:
     ld (BikeCol),a
 
@@ -166,10 +176,13 @@ JumpPhase:
     cp 9
     jp nz,.frameloop
 
+    ; rear wheel lands at LIFTOFF_COL+distance; the last person is at
+    ; PEOPLE_START_COL+NPeople-1, so clearing them needs
+    ; distance >= NPeople + (PEOPLE_START_COL-LIFTOFF_COL)
+    ld a,(NPeople)
+    add a,PEOPLE_START_COL-LIFTOFF_COL
+    ld d,a
     ld a,(JumpDistance)
-    ld hl,NPeople
-    ld d,(hl)
-    inc d
     cp d
     jp nc,JumpSuccess
     jp JumpFail
@@ -251,7 +264,7 @@ ReadPedalInput:
     ld a,(LastKey)
     cp 1
     jr z,.checkP
-    call IncreaseSpeed
+    call PedalStroke
     ld a,1
     ld (LastKey),a
     ret
@@ -261,12 +274,14 @@ ReadPedalInput:
     ld a,(LastKey)
     cp 2
     ret z
-    call IncreaseSpeed
+    call PedalStroke
     ld a,2
     ld (LastKey),a
     ret
 
-IncreaseSpeed:
+; One accepted pedal stroke: more speed, and the rider's legs swap
+; position.
+PedalStroke:
     ld a,(Speed)
     add a,PEDAL_INC
     cp MAX_SPEED+1
@@ -274,6 +289,9 @@ IncreaseSpeed:
     ld a,MAX_SPEED
 .store:
     ld (Speed),a
+    ld a,(BikeFrame)
+    xor 1
+    ld (BikeFrame),a
     ret
 
 ApplyFriction:
@@ -309,8 +327,10 @@ AdvanceBike:
     ld (BikeCol),a
     jp UpdateRowForRamp
 
+; The front wheel (BikeCol+BIKE_W-1) is what follows the ramp surface.
 UpdateRowForRamp:
     ld a,(BikeCol)
+    add a,BIKE_W-1
     cp RAMP_START_COL
     jr c,.flat
     cp RAMP_END_COL+1
@@ -442,7 +462,7 @@ RestoreCell:
     ld a,b
     cp e
     jr c,.blank
-    ld ix,GlyphRamp
+    ld ix,Ramp
     call DrawGlyph
     ld a,ATTR_RAMP
     call SetAttr
@@ -460,13 +480,13 @@ RestoreCell:
     sub PEOPLE_START_COL
     cp d
     jr nc,.groundTile
-    ld ix,GlyphPerson
+    ld ix,Person
     call DrawGlyph
     ld a,ATTR_PERSON
     call SetAttr
     ret
 .groundTile:
-    ld ix,GlyphGround
+    ld ix,Ground
     call DrawGlyph
     ld a,ATTR_GROUND
     call SetAttr
@@ -492,24 +512,99 @@ DrawScene:
     jr nz,.rowloop
     ret
 
-DrawBike:
-    ld a,(BikeRow)
-    ld b,a
-    ld a,(BikeCol)
-    ld c,a
-    ld ix,GlyphBike
-    call DrawGlyph
+; Multi-cell sprite. IN: IX=cell-major sprite data (8 bytes per cell,
+; left to right then top to bottom), B=top row, C=left col, D=height in
+; cells, E=width in cells. Cells that are entirely blank are skipped so
+; the background shows through the sprite's empty corners.
+DrawSprite:
+    ld a,e
+    ld (SprW),a
+    ld a,d
+    ld (SprRowsLeft),a
+.rowloop:
+    push bc
+    ld a,(SprW)
+    ld (SprColsLeft),a
+.colloop:
+    ld a,(ix+0)
+    or (ix+1)
+    or (ix+2)
+    or (ix+3)
+    or (ix+4)
+    or (ix+5)
+    or (ix+6)
+    or (ix+7)
+    jr z,.skip
+    call DrawGlyph          ; advances IX past the cell
     ld a,ATTR_BIKE
     call SetAttr
+    jr .next
+.skip:
+    push bc
+    ld bc,8
+    add ix,bc
+    pop bc
+.next:
+    inc c
+    ld hl,SprColsLeft
+    dec (hl)
+    jr nz,.colloop
+    pop bc
+    inc b
+    ld hl,SprRowsLeft
+    dec (hl)
+    jr nz,.rowloop
     ret
 
-EraseBike:
+; Restores the background under a sprite. IN: B=top row, C=left col,
+; D=height in cells, E=width in cells.
+EraseSprite:
+    ld a,e
+    ld (SprW),a
+    ld a,d
+    ld (SprRowsLeft),a
+.rowloop:
+    push bc
+    ld a,(SprW)
+    ld (SprColsLeft),a
+.colloop:
+    call RestoreCell
+    inc c
+    ld hl,SprColsLeft
+    dec (hl)
+    jr nz,.colloop
+    pop bc
+    inc b
+    ld hl,SprRowsLeft
+    dec (hl)
+    jr nz,.rowloop
+    ret
+
+; Sets up B,C,D,E for the bike's current position (BikeRow/BikeCol is
+; the bottom-left cell).
+BikeBounds:
     ld a,(BikeRow)
+    sub BIKE_H-1
     ld b,a
     ld a,(BikeCol)
     ld c,a
-    call RestoreCell
+    ld d,BIKE_H
+    ld e,BIKE_W
     ret
+
+DrawBike:
+    call BikeBounds
+    ld ix,BikeA
+    ld a,(BikeFrame)
+    or a
+    jr z,.draw
+    ld ix,BikeB
+.draw:
+    jp DrawSprite
+
+EraseBike:
+    call BikeBounds
+    jp EraseSprite
 
 ; ---------------------------------------------------------------------
 ; Text and HUD
@@ -710,7 +805,11 @@ JumpDistance:    DB 0
 JumpStep:        DB 0
 JumpRem:         DB 0
 JumpFrame:       DB 0
+BikeFrame:       DB 0
 LineCount:       DB 0
+SprW:            DB 0
+SprColsLeft:     DB 0
+SprRowsLeft:     DB 0
 Digits:          DB 0,0,0
 
 ; ---------------------------------------------------------------------
@@ -721,50 +820,14 @@ MyFont:
     INCBIN "src/font.bin"
 
 ; ---------------------------------------------------------------------
-; Graphics data (8x8 glyphs)
+; Graphics data: BikeA, BikeB, Person, Ground, Ramp - generated from
+; src/sprites.txt by scripts/gen_sprites.py (run by build.sh).
 ; ---------------------------------------------------------------------
-GlyphBike:
-    DB %00100100
-    DB %01111110
-    DB %10000001
-    DB %10111101
-    DB %10000001
-    DB %01111110
-    DB %00100100
-    DB %00000000
+    INCLUDE "build/sprites.asm"
 
-GlyphPerson:
-    DB %00000000
-    DB %01111100
-    DB %10000010
-    DB %11111110
-    DB %00000000
-    DB %00000000
-    DB %00000000
-    DB %00000000
-
-GlyphGround:
-    DB %00000000
-    DB %00000000
-    DB %00000000
-    DB %00000000
-    DB %00000000
-    DB %00000000
-    DB %11111111
-    DB %00000000
-
-GlyphRamp:
-    DB %11111111
-    DB %11111111
-    DB %11111111
-    DB %11111111
-    DB %11111111
-    DB %11111111
-    DB %11111111
-    DB %11111111
-
+; Height of the bike's bottom row above the ground on each jump frame.
 JumpHeights:
-    DB 5,7,8,8,7,5,3,0
+    DB 4,6,7,7,6,4,2,0
 
 KeyRows:
     DB $fe,$fd,$fb,$f7,$ef,$df,$bf,$7f

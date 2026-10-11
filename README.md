@@ -47,6 +47,11 @@ remote-control protocol.
 `load <snapshot>`, `screenshot <out.png>`, `registers`, `keys <ascii...>`,
 `cmd <raw ZRCP command>`) — useful directly when iterating.
 
+Graphics are drawn as ASCII art in `src/sprites.txt` (`#` = set pixel,
+`.` = clear, sizes in multiples of 8). `build.sh` runs
+`scripts/gen_sprites.py` to turn that into `build/sprites.asm`, which
+`main.asm` includes, so editing a sprite is just editing the text file.
+
 ## Notes on the ZRCP setup
 
 - ZEsarUX is launched with `--vo null --ao null`: the default `cocoa` video
